@@ -520,12 +520,14 @@ nc_run(struct instance *nci)
     rstatus_t status;
     struct context *ctx;
 
+	// 核心数据结构初始化，如解析配置、创建上下文context、初始化事件管理器，监听proxy地址
     ctx = core_start(nci);
     if (ctx == NULL) {
         return;
     }
 
     /* run rabbit run */
+	// 进入事件循环
     for (;;) {
         status = core_loop(ctx);
         if (status != NC_OK) {
@@ -542,8 +544,10 @@ main(int argc, char **argv)
     rstatus_t status;
     struct instance nci;
 
+	//默认参数初始化，如初始化监控stats线程监听的ip和端口
     nc_set_default_options(&nci);
 
+	// 从启动命令行获取一些参数数据
     status = nc_get_options(argc, argv, &nci);
     if (status != NC_OK) {
         nc_show_usage();
@@ -585,12 +589,14 @@ main(int argc, char **argv)
         exit(0);
     }
 
+	// 进行日志初始化、设置守护进程、信号初始化等
     status = nc_pre_run(&nci);
     if (status != NC_OK) {
         nc_post_run(&nci);
         exit(1);
     }
 
+	// 核心函数，进入事件循环
     nc_run(&nci);
 
     nc_post_run(&nci);

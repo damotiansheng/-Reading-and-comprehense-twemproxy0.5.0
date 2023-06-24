@@ -196,7 +196,7 @@ server_conn(struct server *server)
      * balancing on it. Support multiple algorithms for
      * 'server_connections:' > 0 key
      */
-
+	//  如果该server的当前连接数小于该server能打开的最大连接数，则创建一个连接conn，该conn会记录读写回调函数
     if (server->ns_conn_q < pool->server_connections) {
         return conn_get(server, false, pool->redis);
     }
@@ -206,6 +206,7 @@ server_conn(struct server *server)
      * Pick a server connection from the head of the queue and insert
      * it back into the tail of queue to maintain the lru order
      */
+     // 从队列头取一个连接，然后插入到队列尾部，维持lru顺序
     conn = TAILQ_FIRST(&server->s_conn_q);
     ASSERT(!conn->client && !conn->proxy);
 
@@ -223,14 +224,16 @@ server_each_preconnect(void *elem, void *data)
     struct server_pool *pool;
     struct conn *conn;
 
-    server = elem;
+    server = elem;  // 后端的一个server
     pool = server->owner;
 
+	// 创建一个连接conn数据结构，并设置相应的读写回调函数
     conn = server_conn(server);
     if (conn == NULL) {
         return NC_ENOMEM;
     }
 
+	// 对server进行connect建立连接，并加入到事件管理器中去
     status = server_connect(pool->ctx, server, conn);
     if (status != NC_OK) {
         log_warn("connect to server '%.*s' failed, ignored: %s",
@@ -373,7 +376,7 @@ server_close(struct context *ctx, struct conn *conn)
          * 1. request is tagged as noreply or,
          * 2. client has already closed its connection
          */
-        if (msg->swallow || msg->noreply) {
+        if (msg->swallow || msg->noreply) { //该msg对应的客户端fd已经关闭了，则直接put
             log_debug(LOG_INFO, "close s %d swallow req %"PRIu64" len %"PRIu32
                       " type %d", conn->sd, msg->id, msg->mlen, msg->type);
             req_put(msg);
@@ -714,6 +717,7 @@ server_pool_server(struct server_pool *pool, const uint8_t *key, uint32_t keylen
     return server;
 }
 
+// 选择后端服务器并建立连接
 struct conn *
 server_pool_conn(struct context *ctx, struct server_pool *pool, const uint8_t *key,
                  uint32_t keylen)
@@ -728,17 +732,20 @@ server_pool_conn(struct context *ctx, struct server_pool *pool, const uint8_t *k
     }
 
     /* from a given {key, keylen} pick a server from pool */
+	// 根据请求的key选择一个后端server
     server = server_pool_server(pool, key, keylen);
     if (server == NULL) {
         return NULL;
     }
 
     /* pick a connection to a given server */
+	// 创建或者复用已有的conn，为建立连接做准备
     conn = server_conn(server);
     if (conn == NULL) {
         return NULL;
     }
 
+	// 建立与server的连接
     status = server_connect(ctx, server, conn);
     if (status != NC_OK) {
         server_close(ctx, conn);
@@ -754,10 +761,12 @@ server_pool_each_preconnect(void *elem, void *data)
     rstatus_t status;
     struct server_pool *sp = elem;
 
+	// 如果该配置为false则不进行连接
     if (!sp->preconnect) {
         return NC_OK;
     }
 
+	// 对后端每个server进行连接，sp->server是一个数组，保存了后端所有server地址
     status = array_each(&sp->server, server_each_preconnect, NULL);
     if (status != NC_OK) {
         return status;
@@ -822,6 +831,14 @@ server_pool_each_calc_connections(void *elem, void *data)
     return NC_OK;
 }
 
+/*
+distribution  存在ketama、modula和random3种可选的配置。其含义如下：  
+ketama  ketama一致性hash算法，会根据服务器构造出一个hash ring，并为ring上的节点分配hash范围。ketama的
+    优势在于单个节点添加、删除之后，会最大程度上保持整个群集中缓存的key值可以被重用。  
+modula  modula非常简单，就是根据key值的hash值取模，根据取模的结果选择对应的服务器。  
+random  random是无论key值的hash是什么，都随机的选择一个服务器作为key值操作的目标。
+*/
+// 这个函数主要是对选择server的算法进行初始化
 rstatus_t
 server_pool_run(struct server_pool *pool)
 {
@@ -851,6 +868,7 @@ server_pool_each_run(void *elem, void *data)
     return server_pool_run(elem);
 }
 
+//conf_pool为从配置文件中解析出的相关配置pool        拷贝从配置文件中解析出的相关配置到server_pool中，同时进行配置正确性判断
 rstatus_t
 server_pool_init(struct array *server_pool, struct array *conf_pool,
                  struct context *ctx)
@@ -862,12 +880,14 @@ server_pool_init(struct array *server_pool, struct array *conf_pool,
     ASSERT(npool != 0);
     ASSERT(array_n(server_pool) == 0);
 
+	// 为server_pool创建空间和赋值
     status = array_init(server_pool, npool, sizeof(struct server_pool));
     if (status != NC_OK) {
         return status;
     }
 
     /* transform conf pool to server pool */
+	//把conf pool中的相关信息全部拷贝到server_pool中
     status = array_each(conf_pool, conf_pool_each_transform, server_pool);
     if (status != NC_OK) {
         server_pool_deinit(server_pool);
@@ -876,6 +896,7 @@ server_pool_init(struct array *server_pool, struct array *conf_pool,
     ASSERT(array_n(server_pool) == npool);
 
     /* set ctx as the server pool owner */
+	//标记server_pool所属的context上下文
     status = array_each(server_pool, server_pool_each_set_owner, ctx);
     if (status != NC_OK) {
         server_pool_deinit(server_pool);
@@ -883,6 +904,7 @@ server_pool_init(struct array *server_pool, struct array *conf_pool,
     }
 
     /* compute max server connections */
+	// 如注释所示：计算最大server连接数保存在ctx->max_nsconn
     ctx->max_nsconn = 0;
     status = array_each(server_pool, server_pool_each_calc_connections, ctx);
     if (status != NC_OK) {

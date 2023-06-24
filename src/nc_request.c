@@ -18,6 +18,7 @@
 #include <nc_core.h>
 #include <nc_server.h>
 
+// 获取一个接收消息的msg结构，还没开始读取
 struct msg *
 req_get(struct conn *conn)
 {
@@ -94,6 +95,7 @@ req_log(const struct msg *req)
               peer_str, req->done, req->error);
 }
 
+// 回收msg
 void
 req_put(struct msg *msg)
 {
@@ -387,7 +389,7 @@ req_server_dequeue_omsgq(struct context *ctx, struct conn *conn, struct msg *msg
     ASSERT(msg->request);
     ASSERT(!conn->client && !conn->proxy);
 
-    msg_tmo_delete(msg);
+    msg_tmo_delete(msg);  // 从红黑树中删除  
 
     TAILQ_REMOVE(&conn->omsg_q, msg, s_tqe);
 
@@ -395,6 +397,45 @@ req_server_dequeue_omsgq(struct context *ctx, struct conn *conn, struct msg *msg
     stats_server_decr_by(ctx, conn->owner, out_queue_bytes, msg->mlen);
 }
 
+/*
+*             Client+             Proxy           Server+
+*                              (nutcracker)
+*                                   .
+*       msg_recv {read event}       .       msg_recv {read event}
+*         +                         .                         +
+*         |                         .                         |
+*         \                         .                         /
+*         req_recv_next             .             rsp_recv_next
+*           +                       .                       +
+*           |                       .                       |       Rsp
+*           req_recv_done           .           rsp_recv_done      <===
+*             +                     .                     +
+*             |                     .                     |
+*    Req      \                     .                     /
+*    ===>     req_filter*           .           *rsp_filter
+*               +                   .                   +
+*               |                   .                   |
+*               \                   .                   /
+*               req_forward-//  (a) . (c)  \\-rsp_forward
+*                                   .
+*                                   .
+*       msg_send {write event}      .      msg_send {write event}
+*         +                         .                         +
+*         |                         .                         |
+*    Rsp' \                         .                         /     Req'
+*   <===  rsp_send_next             .             req_send_next     ===>
+*           +                       .                       +
+*           |                       .                       |
+*           \                       .                       /
+*           rsp_send_done-//    (d) . (b)    //-req_send_done
+*
+*
+* (a) -> (b) -> (c) -> (d) is the normal flow of transaction consisting
+* of a single request response, where (a) and (b) handle request from
+* client, while (c) and (d) handle the corresponding response from the
+* server.
+*/
+// 获取一个用于接收数据msg结构，还没开始读取，如果之前的msg中KV数据没有读取完毕，则直接用上次的msg
 struct msg *
 req_recv_next(struct context *ctx, struct conn *conn, bool alloc)
 {
@@ -424,16 +465,17 @@ req_recv_next(struct context *ctx, struct conn *conn, bool alloc)
          * is able to receive data from the proxy. The proxy closes its
          * half (by sending the second FIN) when the client has no
          * outstanding requests
-         */
-        if (!conn->active(conn)) {
-            conn->done = 1;
+         *///只有该conn上面的数据的omsg_q队列上的数据全部发送完成后，才会真正指done为1，然后在core_core中关闭释放链接
+        if (!conn->active(conn)) {  // client_active函数，server_active函数
+            conn->done = 1;  // core_core函数判断如果为1则调用core_close关闭连接
             log_debug(LOG_INFO, "c %d is done", conn->sd);
         }
         return NULL;
     }
 
+	
     msg = conn->rmsg;
-    if (msg != NULL) {
+    if (msg != NULL) { //说明之前某个KV数据没读取完毕，因此就不会往后端转发，这次还是使用该msg进行读取新来的数据是得KV成为完整的KV
         ASSERT(msg->request);
         return msg;
     }
@@ -450,6 +492,7 @@ req_recv_next(struct context *ctx, struct conn *conn, bool alloc)
     return msg;
 }
 
+// 对客户端进行应答，req为接收客户端数据的时候分配的msg，rsp为客户端应答使用的msg
 static rstatus_t
 req_make_reply(struct context *ctx, struct conn *conn, struct msg *req)
 {
@@ -507,6 +550,7 @@ req_filter(struct conn *conn, struct msg *msg)
      * If this conn is not authenticated, we will mark it as noforward,
      * and handle it in the redis_reply handler.
      */
+     // 还没和后端redis集群进行认证，则客户端发送过来的命令就不用转发到后端
     if (!conn_authenticated(conn)) {
         msg->noforward = 1;
     }
@@ -564,8 +608,10 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
     ASSERT(c_conn->client && !c_conn->proxy);
 
     /* enqueue message (request) into client outq, if response is expected */
+	// 将请求消息入队到client的输出队列中
+	//req_forward把msg入队到客户端连接c_conn->enqueue_outq    ，req_send_done把msg入队到服务端连接s_conn->enqueue_outq
     if (!msg->noreply) {
-        c_conn->enqueue_outq(ctx, c_conn, msg);
+        c_conn->enqueue_outq(ctx, c_conn, msg);  // 调用req_client_enqueue_omsgq函数，就是执行:TAILQ_INSERT_TAIL(&conn->omsg_q, msg, c_tqe);
     }
 
     ASSERT(array_n(msg->keys) > 0);
@@ -573,6 +619,7 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
     key = kpos->start;
     keylen = (uint32_t)(kpos->end - kpos->start);
 
+	// 根据key选择一个后端server并建立连接
     s_conn = server_pool_conn(ctx, c_conn->owner, key, keylen);
     if (s_conn == NULL) {
         /*
@@ -597,6 +644,7 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
 
     /* enqueue the message (request) into server inq */
     if (TAILQ_EMPTY(&s_conn->imsg_q)) {
+		// 注册server连接的可写事件
         status = event_add_out(ctx->evb, s_conn);
         if (status != NC_OK) {
             req_forward_error(ctx, c_conn, msg);
@@ -605,6 +653,7 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
         }
     }
 
+	// 判断是否有进行认证，没认证则先进行认证
     if (!conn_authenticated(s_conn)) {
         status = msg->add_auth(ctx, c_conn, s_conn);
         if (status != NC_OK) {
@@ -614,7 +663,9 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
         }
     }
 
-    s_conn->enqueue_inq(ctx, s_conn, msg);
+	// 入队到server连接的imsg_q队列中去，同时会插入到红黑树中以便进行超时判断，每次触发会调用core_timeout进行超时判断处理
+	// 在core_core中的写事件处理中会把imsg_q中的msg发送出去
+    s_conn->enqueue_inq(ctx, s_conn, msg);   // 调用 req_server_enqueue_imsgq，会调用TAILQ_INSERT_TAIL(&conn->imsg_q, msg, s_tqe);
 
     req_forward_stats(ctx, s_conn->owner, msg);
 
@@ -641,7 +692,7 @@ req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
 
     /* enqueue next message (request), if any */
     conn->rmsg = nmsg;
-
+	// 判断是否需要进行转发到后端
     if (req_filter(conn, msg)) {
         return;
     }
@@ -659,6 +710,7 @@ req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
             return;
         }
 
+		// 注册到事件管理器中进行监听
         status = event_add_out(ctx->evb, conn);
         if (status != NC_OK) {
             conn->err = errno;
@@ -670,6 +722,8 @@ req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
     /* do fragment */
     pool = conn->owner;
     TAILQ_INIT(&frag_msgq);
+	//分片  mget mset等批处理命令中的不同KV可能分布在后端不同服务器上因此需要拆分
+	//如果需要分发到多个后端服务器，则frag_msgq不为空
     status = msg->fragment(msg, array_n(&pool->server), &frag_msgq);
     if (status != NC_OK) {
         if (!msg->noreply) {
@@ -680,7 +734,7 @@ req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
 
     /* if no fragment happened */
     if (TAILQ_EMPTY(&frag_msgq)) {
-        req_forward(ctx, conn, msg);
+        req_forward(ctx, conn, msg);  // 转到后端服务器
         return;
     }
 
@@ -703,6 +757,8 @@ req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
     return;
 }
 
+//接收的客户端msg信息通过req_server_enqueue_imsgq添加到该队列 在req_send_next中发往后端真实服务器
+//从imsg_q队列中取出msg然后发往后端真实服务器
 struct msg *
 req_send_next(struct context *ctx, struct conn *conn)
 {
@@ -716,9 +772,9 @@ req_send_next(struct context *ctx, struct conn *conn)
     }
 
     nmsg = TAILQ_FIRST(&conn->imsg_q);
-    if (nmsg == NULL) {
+    if (nmsg == NULL) { //说明已经写数据完成，把imsg_q队列上的所有msg信息已经发送完毕
         /* nothing to send as the server inq is empty */
-        status = event_del_out(ctx->evb, conn);
+        status = event_del_out(ctx->evb, conn);   // 没有msg需要发往后端了，删除可写事件
         if (status != NC_OK) {
             conn->err = errno;
         }
@@ -728,11 +784,12 @@ req_send_next(struct context *ctx, struct conn *conn)
 
     msg = conn->smsg;
     if (msg != NULL) {
+		//如果上次还有未发送的msg，则取出来返回。也就是如果conn->smsg上面有还有未发送出去的数据，则从该smsg取出一个msg发送，否则从imsg_q队列上面取出来发送
         ASSERT(msg->request && !msg->done);
-        nmsg = TAILQ_NEXT(msg, s_tqe);
+        nmsg = TAILQ_NEXT(msg, s_tqe);  //指向imsg_q的下一个msg
     }
 
-    conn->smsg = nmsg;
+    conn->smsg = nmsg; //需要发送往后端真实服务器的真实msg全部保存到conn->smsg中
 
     if (nmsg == NULL) {
         return NULL;
@@ -758,7 +815,7 @@ req_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
               "s %d", msg->id, msg->mlen, msg->type, conn->sd);
 
     /* dequeue the message (request) from server inq */
-    conn->dequeue_inq(ctx, conn, msg);
+    conn->dequeue_inq(ctx, conn, msg);  // 该消息发送给后端后，从server的输入队列删除
 
     /*
      * noreply request instructs the server not to send any response. So,
@@ -766,7 +823,7 @@ req_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
      * Otherwise, free the noreply request
      */
     if (!msg->noreply) {
-        conn->enqueue_outq(ctx, conn, msg);
+        conn->enqueue_outq(ctx, conn, msg);  // 调用 req_server_enqueue_omsgq入队，TAILQ_INSERT_TAIL(&conn->omsg_q, msg, s_tqe);
     } else {
         req_put(msg);
     }

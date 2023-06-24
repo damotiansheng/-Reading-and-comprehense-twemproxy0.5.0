@@ -238,6 +238,8 @@ conn_get(void *owner, bool client, bool redis)
         }
     }
 
+	// conn->ref回调函数是 server_ref函数
+	// 在该函数中会递增server的连接数以及将该conn插入到server中的连接队列（server->s_conn_q）中去
     conn->ref(conn, owner);
     log_debug(LOG_VVERB, "get conn %p client %d", conn, conn->client);
 
@@ -291,6 +293,7 @@ conn_free(struct conn *conn)
     nc_free(conn);
 }
 
+// 回收该conn
 void
 conn_put(struct conn *conn)
 {

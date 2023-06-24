@@ -163,7 +163,7 @@ msg_tmo_insert(struct msg *msg, struct conn *conn)
     }
 
     node = &msg->tmo_rbe;
-    node->key = nc_msec_now() + timeout;
+    node->key = nc_msec_now() + timeout;  // key是超时时间
     node->data = conn;
 
     rbtree_insert(&tmo_rbt, node);
@@ -190,6 +190,7 @@ msg_tmo_delete(struct msg *msg)
     log_debug(LOG_VERB, "delete msg %"PRIu64" from tmo rbt", msg->id);
 }
 
+// 获取接收数据的msg结构，优先从空闲消息队列中获取
 static struct msg *
 _msg_get(void)
 {
@@ -277,6 +278,7 @@ done:
     return msg;
 }
 
+// 获取接收消息的msg结构，并设置相应的消息解析处理函数
 struct msg *
 msg_get(struct conn *conn, bool request, bool redis)
 {
@@ -369,6 +371,7 @@ msg_free(struct msg *msg)
     nc_free(msg);
 }
 
+// 回收msg结构，包括回收mbuf到缓冲池nfree_mbufq中和回收msg结构到缓冲池nfree_msgq中
 void
 msg_put(struct msg *msg)
 {
@@ -628,6 +631,7 @@ msg_repair(struct context *ctx, struct conn *conn, struct msg *msg)
     return NC_OK;
 }
 
+//解析后端发送来的应答报文，或者解析客户端发送来的请求命令行
 static rstatus_t
 msg_parse(struct context *ctx, struct conn *conn, struct msg *msg)
 {
@@ -638,7 +642,8 @@ msg_parse(struct context *ctx, struct conn *conn, struct msg *msg)
         conn->recv_done(ctx, conn, msg, NULL);
         return NC_OK;
     }
-
+	
+	// 解析msg->mbuf中的数据，注意mbuf中pos指针是没有变化的，还是指向以前的位置，是通过r->pos来一步步解析的
     msg->parser(msg);
 
     switch (msg->result) {
@@ -663,6 +668,7 @@ msg_parse(struct context *ctx, struct conn *conn, struct msg *msg)
     return conn->err != 0 ? NC_ERROR : status;
 }
 
+//接收客户端发送过来的命令报文，或者解析后端发送来的应答
 static rstatus_t
 msg_recv_chain(struct context *ctx, struct conn *conn, struct msg *msg)
 {
@@ -672,9 +678,10 @@ msg_recv_chain(struct context *ctx, struct conn *conn, struct msg *msg)
     size_t msize;
     ssize_t n;
 
-    mbuf = STAILQ_LAST(&msg->mhdr, mbuf, next);
-    if (mbuf == NULL || mbuf_full(mbuf)) {
-        mbuf = mbuf_get();
+	mbuf = STAILQ_LAST(&msg->mhdr, mbuf, next); // 查找msg所处队列的最后
+    // KV数据过来后发现该msg上面一个mbuf都没有，或者该msg上面的mbuf已经用完了
+    if (mbuf == NULL || mbuf_full(mbuf)) { //获取msg对应的mbuf上是否还有空余空间，没有则重新分配一个mbuf，并加入到mhdr链中
+        mbuf = mbuf_get(); // 重新获取一个mbuf   ，外层函数req_recv_next/rsp_recv_next函数中只是获取一个msg，但是没有mbuf，这里获取mbuf加入到msg链表中
         if (mbuf == NULL) {
             return NC_ENOMEM;
         }
@@ -683,9 +690,9 @@ msg_recv_chain(struct context *ctx, struct conn *conn, struct msg *msg)
     }
     ASSERT(mbuf->end - mbuf->last > 0);
 
-    msize = mbuf_size(mbuf);
+    msize = mbuf_size(mbuf); //mbuf可用空间
 
-    n = conn_recv(conn, mbuf->last, msize);
+    n = conn_recv(conn, mbuf->last, msize);  // 读取数据
     if (n < 0) {
         if (n == NC_EAGAIN) {
             return NC_OK;
@@ -716,6 +723,7 @@ msg_recv_chain(struct context *ctx, struct conn *conn, struct msg *msg)
     return NC_OK;
 }
 
+// 从client接收请求或者从server接收回包
 rstatus_t
 msg_recv(struct context *ctx, struct conn *conn)
 {
@@ -726,7 +734,7 @@ msg_recv(struct context *ctx, struct conn *conn)
 
     conn->recv_ready = 1;
     do {
-        msg = conn->recv_next(ctx, conn, true);
+        msg = conn->recv_next(ctx, conn, true);  // 获取接收消息的msg结构
         if (msg == NULL) {
             return NC_OK;
         }
@@ -786,7 +794,7 @@ msg_send_chain(struct context *ctx, struct conn *conn, struct msg *msg)
                 mlen = limit - nsend;
             }
 
-            ciov = array_push(&sendv);
+            ciov = array_push(&sendv);  // 消息发放sendv中
             ciov->iov_base = mbuf->pos;
             ciov->iov_len = mlen;
 
@@ -797,6 +805,7 @@ msg_send_chain(struct context *ctx, struct conn *conn, struct msg *msg)
             break;
         }
 
+		// 得到下一个要发送的msg
         msg = conn->send_next(ctx, conn);
         if (msg == NULL) {
             break;
@@ -808,6 +817,7 @@ msg_send_chain(struct context *ctx, struct conn *conn, struct msg *msg)
      * see PR: https://github.com/twitter/twemproxy/pull/225
      */
     conn->smsg = NULL;
+	// 发送队列非空则进行发送，即发往后端server或者client
     if (!TAILQ_EMPTY(&send_msgq) && nsend != 0) {
         n = conn_sendv(conn, &sendv, nsend);
     } else {
@@ -824,7 +834,7 @@ msg_send_chain(struct context *ctx, struct conn *conn, struct msg *msg)
         TAILQ_REMOVE(&send_msgq, msg, m_tqe);
 
         if (nsent == 0) {
-            if (msg->mlen == 0) {
+            if (msg->mlen == 0) {  // 该消息发送完毕，调用 req_send_done函数或者rsp_send_done函数
                 conn->send_done(ctx, conn, msg);
             }
             continue;
@@ -867,6 +877,7 @@ msg_send_chain(struct context *ctx, struct conn *conn, struct msg *msg)
     return (n == NC_EAGAIN) ? NC_OK : NC_ERROR;
 }
 
+// 即用来发送msg给后端server，也用来发送响应msg给client
 rstatus_t
 msg_send(struct context *ctx, struct conn *conn)
 {
@@ -877,13 +888,16 @@ msg_send(struct context *ctx, struct conn *conn)
 
     conn->send_ready = 1;
     do {
-        msg = conn->send_next(ctx, conn);
+		// 获取要发送的msg
+		// 如果是发送给后端server，则从conn的imsg_q队列取msg，msg_send_chain->req_send_done会将该msg从imsg_q删除并入队到conn的omsg_q队列中去
+		// 如果是发送给client，则从conn的omsg_q队列得到msg，然后通过msg->peer得到回包msg
+        msg = conn->send_next(ctx, conn);  // 调用req_send_next函数或者rsp_send_next函数，取出需要发送的msg队列上的一条msg
         if (msg == NULL) {
             /* nothing to send */
             return NC_OK;
         }
 
-        status = msg_send_chain(ctx, conn, msg);
+        status = msg_send_chain(ctx, conn, msg); // 发送给后端server或者客户端
         if (status != NC_OK) {
             return status;
         }

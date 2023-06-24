@@ -67,6 +67,7 @@ core_ctx_create(struct instance *nci)
     ctx->max_nsconn = 0;
 
     /* parse and create configuration */
+	//创建存储配置项的空间，并解析配置项，同时检查错误信息
     ctx->cf = conf_create(nci->conf_filename);
     if (ctx->cf == NULL) {
         nc_free(ctx);
@@ -74,6 +75,7 @@ core_ctx_create(struct instance *nci)
     }
 
     /* initialize server pool from configuration */
+	// 从配置文件中解析参数配置保存到ctx->pool中
     status = server_pool_init(&ctx->pool, &ctx->cf->pool, ctx);
     if (status != NC_OK) {
         conf_destroy(ctx->cf);
@@ -85,6 +87,7 @@ core_ctx_create(struct instance *nci)
      * Get rlimit and calculate max client connections after we have
      * calculated max server connections
      */
+     //计算客户端最多使用的并发连接数，即max client connections，保存在ctx->max_ncconn
     status = core_calc_connections(ctx);
     if (status != NC_OK) {
         server_pool_deinit(&ctx->pool);
@@ -94,6 +97,7 @@ core_ctx_create(struct instance *nci)
     }
 
     /* create stats per server pool */
+	// 创建一个stat线程，对每个server pool进行stats数据统计，具体会记录client和server的一些指标数据
     ctx->stats = stats_create(nci->stats_port, nci->stats_addr, nci->stats_interval,
                               nci->hostname, &ctx->pool);
     if (ctx->stats == NULL) {
@@ -104,6 +108,7 @@ core_ctx_create(struct instance *nci)
     }
 
     /* initialize event handling for client, proxy and server */
+	// 创建事件管理器，事件回调函数为core_core
     ctx->evb = event_base_create(EVENT_SIZE, &core_core);
     if (ctx->evb == NULL) {
         stats_destroy(ctx->stats);
@@ -114,6 +119,7 @@ core_ctx_create(struct instance *nci)
     }
 
     /* preconnect? servers in server pool */
+	// 如果preconnect参数为true，则启动时建立对后端server的连接
     status = server_pool_preconnect(ctx);
     if (status != NC_OK) {
         server_pool_disconnect(ctx);
@@ -126,6 +132,7 @@ core_ctx_create(struct instance *nci)
     }
 
     /* initialize proxy per server pool */
+	// bind创建proxy监听的套接字并进行监听
     status = proxy_init(ctx);
     if (status != NC_OK) {
         server_pool_disconnect(ctx);
@@ -164,12 +171,14 @@ core_start(struct instance *nci)
     msg_init();
     conn_init();
 
+	// 核心数据结构初始化，如创建事件管理器，bind多个server pool地址进行监听并加入事件管理器中进行监听
     ctx = core_ctx_create(nci);
     if (ctx != NULL) {
         nci->ctx = ctx;
         return ctx;
     }
 
+	// 异常时释放相应空间
     conn_deinit();
     msg_deinit();
     mbuf_deinit();
@@ -270,14 +279,14 @@ core_timeout(struct context *ctx)
         struct conn *conn;
         int64_t now, then;
 
-        msg = msg_tmo_min();
+        msg = msg_tmo_min();  // 得到最快超时的msg，平衡二叉树的最左节点
         if (msg == NULL) {
             ctx->timeout = ctx->max_timeout;
             return;
         }
 
         /* skip over req that are in-error or done */
-
+		// 跳过出现错误或已完成的请求
         if (msg->error || msg->done) {
             msg_tmo_delete(msg);
             continue;
@@ -289,21 +298,23 @@ core_timeout(struct context *ctx)
          */
 
         conn = msg->tmo_rbe.data;
-        then = msg->tmo_rbe.key;
+        then = msg->tmo_rbe.key;  // 超时时间
 
         now = nc_msec_now();
-        if (now < then) {
+        if (now < then) {  // 未超时
             int delta = (int)(then - now);
             ctx->timeout = MIN(delta, ctx->max_timeout);
             return;
         }
 
+		// 超时了，超时的处理，设置该conn的err为超时
         log_debug(LOG_INFO, "req %"PRIu64" on s %d timedout", msg->id, conn->sd);
 
+		// 从红黑树删除该超时msg
         msg_tmo_delete(msg);
         conn->err = ETIMEDOUT;
 
-        core_close(ctx, conn);
+        core_close(ctx, conn); // 如果后端超时还没有应答，则关闭conn的连接
     }
 }
 
@@ -311,7 +322,7 @@ rstatus_t
 core_core(void *arg, uint32_t events)
 {
     rstatus_t status;
-    struct conn *conn = arg;
+    struct conn *conn = arg;  // 加入事件监听时设置的conn
     struct context *ctx;
 
     if (conn->owner == NULL) {
@@ -319,7 +330,7 @@ core_core(void *arg, uint32_t events)
         return NC_OK;
     }
 
-    ctx = conn_to_ctx(conn);
+    ctx = conn_to_ctx(conn);  // 通过连接conn得到上下文
 
     log_debug(LOG_VVERB, "event %04"PRIX32" on %c %d", events,
               conn->client ? 'c' : (conn->proxy ? 'p' : 's'), conn->sd);
@@ -333,6 +344,7 @@ core_core(void *arg, uint32_t events)
     }
 
     /* read takes precedence over write */
+	// 读比写优先级高
     if (events & EVENT_READ) {
         status = core_recv(ctx, conn);
         if (status != NC_OK || conn->done || conn->err) {

@@ -232,6 +232,9 @@ stats_server_unmap(struct array *stats_server)
     log_debug(LOG_VVVERB, "unmap %"PRIu32" stats servers", nserver);
 }
 
+// 把stats_pool_codec数组成员（全局变量，client监控指标）赋值给stats_pool->metric数组
+// 把stats_server_codec数组成员（全局变量，server监控指标）赋值给stats_pool->server数组中的相关成员
+// 这里其实就是初始化一些监控stats指标数据，用来stats数据
 static rstatus_t
 stats_pool_init(struct stats_pool *stp, const struct server_pool *sp)
 {
@@ -241,11 +244,13 @@ stats_pool_init(struct stats_pool *stp, const struct server_pool *sp)
     array_null(&stp->metric);
     array_null(&stp->server);
 
+	// 把stats_pool_codec中的成员拷贝到stats_pool->metric
     status = stats_pool_metric_init(&stp->metric);
     if (status != NC_OK) {
         return status;
     }
 
+	//把stats_server_codec数组成员赋值给stats_pool->server数组中的相关成员
     status = stats_server_map(&stp->server, &sp->server);
     if (status != NC_OK) {
         stats_metric_deinit(&stp->metric);
@@ -869,6 +874,7 @@ stats_start_aggregator(struct stats *st)
         return status;
     }
 
+	// 创建监控stats线程
     status = pthread_create(&st->tid, NULL, stats_loop, st);
     if (status < 0) {
         log_error("stats aggregator create failed: %s", strerror(status));
@@ -888,6 +894,7 @@ stats_stop_aggregator(struct stats *st)
     close(st->sd);
 }
 
+// 创建监控stats线程
 struct stats *
 stats_create(uint16_t stats_port, const char *stats_ip, int stats_interval,
              const char *source, const struct array *server_pool)
@@ -936,27 +943,31 @@ stats_create(uint16_t stats_port, const char *stats_ip, int stats_interval,
     st->aggregate = 0;
 
     /* map server pool to current (a), shadow (b) and sum (c) */
-
+	// 将client和server监控指标数据初始化到st->current，方便stat数据
     status = stats_pool_map(&st->current, server_pool);
     if (status != NC_OK) {
         goto error;
     }
 
+	// 将client和server监控指标数据初始化到st->shadow，方便stat数据
     status = stats_pool_map(&st->shadow, server_pool);
     if (status != NC_OK) {
         goto error;
     }
 
+	// 同上
     status = stats_pool_map(&st->sum, server_pool);
     if (status != NC_OK) {
         goto error;
     }
 
+	// 为stats格式信息分配buf空间
     status = stats_create_buf(st);
     if (status != NC_OK) {
         goto error;
     }
 
+	// 创建stats线程，监听，最后是一个http的stats服务
     status = stats_start_aggregator(st);
     if (status != NC_OK) {
         goto error;

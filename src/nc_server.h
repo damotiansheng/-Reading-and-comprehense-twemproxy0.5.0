@@ -78,12 +78,13 @@ struct server {
     struct sockinfo    info;          /* server socket info */
 
     uint32_t           ns_conn_q;     /* # server connection */
-    struct conn_tqh    s_conn_q;      /* server connection q */
+    struct conn_tqh    s_conn_q;      /* server connection q */ // 连接队列
 
     int64_t            next_retry;    /* next retry time in usec */
     uint32_t           failure_count; /* # consecutive failures */
 };
 
+// 其中的一些参数在README.md中有说明
 struct server_pool {
     uint32_t           idx;                  /* pool index */
     struct context     *ctx;                 /* owner context */
@@ -113,12 +114,14 @@ struct server_pool {
     int                redis_db;             /* redis database to connect to */
     uint32_t           client_connections;   /* maximum # client connection */
     uint32_t           server_connections;   /* maximum # server connection */
+	// server_connections: The maximum number of connections that can be opened to each server. By default, we open at most 1 server connection.
     int64_t            server_retry_timeout; /* server retry timeout in usec */
     uint32_t           server_failure_limit; /* server failure limit */
     struct string      redis_auth;           /* redis_auth password (matches requirepass on redis) */
     unsigned           require_auth;         /* require_auth? */
     unsigned           auto_eject_hosts:1;   /* auto_eject_hosts? */
-    unsigned           preconnect:1;         /* preconnect? */
+    unsigned           preconnect:1;         /* preconnect? */  // 控制是否在进程启动时连接所有后端server
+//    preconnect: A boolean value that controls if twemproxy should preconnect to all the servers in this pool on process start. Defaults to false.
     unsigned           redis:1;              /* redis? */
     unsigned           tcpkeepalive:1;       /* tcpkeepalive? */
     unsigned           reuseport:1;          /* set SO_REUSEPORT to socket */

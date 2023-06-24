@@ -83,6 +83,8 @@ rsp_make_error(struct context *ctx, struct conn *conn, struct msg *msg)
     return msg_get_error(conn->redis, err);
 }
 
+
+//msg_recv中调用，获取一个空闲msg
 struct msg *
 rsp_recv_next(struct context *ctx, struct conn *conn, bool alloc)
 {
@@ -230,6 +232,8 @@ rsp_forward_stats(struct context *ctx, struct server *server, struct msg *msg, u
     stats_server_incr_by(ctx, server, response_bytes, msgsize);
 }
 
+// 把后端应答回来的msg和客户端msg关联在一起,然后通过req_done函数里面的event_add_out，来触发客户端conn把这些后端回包msg发送出去
+// 参数msg是server的回包msg
 static void
 rsp_forward(struct context *ctx, struct conn *s_conn, struct msg *msg)
 {
@@ -245,24 +249,32 @@ rsp_forward(struct context *ctx, struct conn *s_conn, struct msg *msg)
     server_ok(ctx, s_conn);
 
     /* dequeue peer message (request) from server */
-    pmsg = TAILQ_FIRST(&s_conn->omsg_q);
+    pmsg = TAILQ_FIRST(&s_conn->omsg_q);   // 取第一个队列元素，先前入队是用TAILQ_INSERT_TAIL(&conn->omsg_q, msg, s_tqe);
     ASSERT(pmsg != NULL && pmsg->peer == NULL);
     ASSERT(pmsg->request && !pmsg->done);
 
-    s_conn->dequeue_outq(ctx, s_conn, pmsg);
+	// 请求msg从server的输出队列中出队
+    s_conn->dequeue_outq(ctx, s_conn, pmsg);  // 调用 req_server_dequeue_omsgq 函数，会调用TAILQ_REMOVE(&conn->omsg_q, msg, s_tqe);
     pmsg->done = 1;
 
     /* establish msg <-> pmsg (response <-> request) link */
+	// 核心逻辑：建立请求msg和回包msg的连接
+	/* pmsg为接收客户端报文的msg信息，参数msg为后端应答回来的msg信息 */
+	/* 把接收的客户端msg信息和后端应答回来的msg信息进行关联 */
+	// 如果2个client复用了同一个server连接，client1先发送了get a, client2接着发送了get b, 在server连接的omsg_q就是(client1_req, client2_req)，但是
+	// client2的响应先回来，即这里的msg是get b的结果，但是pmsg是取了第一个，即client1，岂不是有问题？
+	// 没有问题，因为复用同一个server连接，get a和get b是先后发送到同一个server，由于后端是redis，单线程处理，
+	// 所以get a(client1请求)回包也是先回来，get b（client2请求）的回包后回来，不会出现client2请求先回来的情况
     pmsg->peer = msg;
     msg->peer = pmsg;
 
     msg->pre_coalesce(msg);
 
-    c_conn = pmsg->owner;
+    c_conn = pmsg->owner;  // 找到client的conn
     ASSERT(c_conn->client && !c_conn->proxy);
 
     if (req_done(c_conn, TAILQ_FIRST(&c_conn->omsg_q))) {
-        status = event_add_out(ctx->evb, c_conn);
+        status = event_add_out(ctx->evb, c_conn);  // 注册client连接c_conn的读写事件到事件管理器中进行监听
         if (status != NC_OK) {
             c_conn->err = errno;
         }
@@ -291,6 +303,7 @@ rsp_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
     rsp_forward(ctx, conn, msg);
 }
 
+// 得到要发送给client的响应msg，放在conn->smsg
 struct msg *
 rsp_send_next(struct context *ctx, struct conn *conn)
 {
@@ -338,17 +351,18 @@ rsp_send_next(struct context *ctx, struct conn *conn)
         pmsg->peer = msg;
         stats_pool_incr(ctx, conn->owner, forward_error);
     } else {
-        msg = pmsg->peer;
+        msg = pmsg->peer;  //msg是客户端msg对应的peer，也就是后端应答的msg,配合rsp_forward阅读
     }
     ASSERT(!msg->request);
 
-    conn->smsg = msg;
+    conn->smsg = msg;  // 要发送的msg放在conn->smsg
 
     log_debug(LOG_VVERB, "send next rsp %"PRIu64" on c %d", msg->id, conn->sd);
 
     return msg;
 }
 
+// 给client发送响应msg完毕后，会调用该函数，msg为响应msg
 void
 rsp_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
 {

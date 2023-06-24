@@ -134,6 +134,7 @@ proxy_listen(struct context *ctx, struct conn *p)
         return NC_ERROR;
     }
 
+	// 对p->sd开启SO_REUSEADDR特性，即可以多个进程或者多个线程同时监听同一个地址
     status = proxy_reuse(p);
     if (status < 0) {
         log_error("reuse of addr '%.*s' for listening on p %d failed: %s",
@@ -183,6 +184,7 @@ proxy_listen(struct context *ctx, struct conn *p)
         return NC_ERROR;
     }
 
+	// 加入到时间管理器的监听事件中，并将p赋值给epoll_event.data.ptr，以便事件触发时得到该conn
     status = event_add_conn(ctx->evb, p);
     if (status < 0) {
         log_error("event add conn p %d on addr '%.*s' failed: %s",
@@ -209,6 +211,7 @@ proxy_each_init(void *elem, void *data)
     struct server_pool *pool = elem;
     struct conn *p;
 
+	// 获取proxy监听连接的conn，并进行初始化
     p = conn_get_proxy(pool);
     if (p == NULL) {
         return NC_ENOMEM;

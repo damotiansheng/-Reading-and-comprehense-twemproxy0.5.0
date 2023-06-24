@@ -65,6 +65,7 @@ client_unref(struct conn *conn)
               pool, pool->name.len, pool->name.data);
 }
 
+// 判断该连接是否active
 bool
 client_active(const struct conn *conn)
 {
