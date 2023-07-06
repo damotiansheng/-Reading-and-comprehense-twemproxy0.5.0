@@ -468,12 +468,13 @@ static rstatus_t
 nc_pre_run(struct instance *nci)
 {
     rstatus_t status;
-
+	// 初始化日志
     status = log_init(nci->log_level, nci->log_filename);
     if (status != NC_OK) {
         return status;
     }
 
+    // 是否守护进行运行
     if (daemonize) {
         status = nc_daemonize(1);
         if (status != NC_OK) {

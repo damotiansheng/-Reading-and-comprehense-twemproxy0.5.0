@@ -41,6 +41,7 @@ static const struct string dist_strings[] = {
 };
 #undef DEFINE_ACTION
 
+// 不同的配置项使用不同函数进行解析
 static const struct command conf_commands[] = {
     { string("listen"),
       conf_set_listen,
@@ -323,6 +324,7 @@ conf_pool_each_transform(void *elem, void *data)
     return NC_OK;
 }
 
+// 打印配置
 static void
 conf_dump(const struct conf *cf)
 {
@@ -372,6 +374,7 @@ conf_dump(const struct conf *cf)
     }
 }
 
+// 初始化yaml parser
 static rstatus_t
 conf_yaml_init(struct conf *cf)
 {
@@ -517,8 +520,8 @@ conf_handler(struct conf *cf, void *data)
     }
 
     narg = array_n(&cf->arg);
-    value = array_get(&cf->arg, narg - 1);
-    key = array_get(&cf->arg, narg - 2);
+    value = array_get(&cf->arg, narg - 1);  // 配置项value
+    key = array_get(&cf->arg, narg - 2);  // 配置项key
 
     log_debug(LOG_VVERB, "conf handler on %.*s: %.*s", key->len, key->data,
               value->len, value->data);
@@ -627,6 +630,7 @@ conf_end_parse(struct conf *cf)
     return NC_OK;
 }
 
+// 核心yaml配置解析函数
 static rstatus_t
 conf_parse_core(struct conf *cf, void *data)
 {
@@ -683,6 +687,8 @@ conf_parse_core(struct conf *cf, void *data)
             leaf = true;
         } else if (cf->depth == CONF_ROOT_DEPTH) {
             /* create new conf_pool */
+			// 是一个新的监听server，创建新的conf_pool(保存一个监听server的配置)
+			// array_push(&cf->pool)是分配一个conf_pool空间，data实际类型是conf_pool
             data = array_push(&cf->pool);
             if (data == NULL) {
                 status = NC_ENOMEM;
@@ -713,7 +719,7 @@ conf_parse_core(struct conf *cf, void *data)
     }
 
     if (leaf || new_pool) {
-        status = conf_handler(cf, data);
+        status = conf_handler(cf, data);  // 具体解析handler, data是conf_pool类型
 
         if (leaf) {
             conf_pop_scalar(cf);
@@ -727,9 +733,11 @@ conf_parse_core(struct conf *cf, void *data)
         }
     }
 
+	// 递归调用
     return conf_parse_core(cf, data);
 }
 
+// 配置解析函数
 static rstatus_t
 conf_parse(struct conf *cf)
 {
@@ -743,6 +751,7 @@ conf_parse(struct conf *cf)
         return status;
     }
 
+	// 具体调用该函数解析
     status = conf_parse_core(cf, NULL);
     if (status != NC_OK) {
         return status;
@@ -1366,6 +1375,7 @@ conf_post_validate(struct conf *cf)
     return NC_OK;
 }
 
+// 创建配置，解析配置文件并保存配置项
 struct conf *
 conf_create(const char *filename)
 {
@@ -1377,12 +1387,14 @@ conf_create(const char *filename)
         return NULL;
     }
 
+    // 校验配置文件
     /* validate configuration file before parsing */
     status = conf_pre_validate(cf);
     if (status != NC_OK) {
         goto error;
     }
 
+    // 解析配置文件
     /* parse the configuration file */
     status = conf_parse(cf);
     if (status != NC_OK) {
@@ -1395,6 +1407,7 @@ conf_create(const char *filename)
         goto error;
     }
 
+	// 打印配置到log中
     conf_dump(cf);
 
     fclose(cf->fh);
@@ -1468,7 +1481,7 @@ conf_set_listen(struct conf *cf, const struct command *cmd, void *conf)
         return "is a duplicate";
     }
 
-    value = array_top(&cf->arg);
+    value = array_top(&cf->arg);  // value是listen配置项对应的值
 
     status = string_duplicate(&field->pname, value);
     if (status != NC_OK) {

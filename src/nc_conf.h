@@ -76,6 +76,21 @@ struct conf_server {
     unsigned        valid:1;    /* valid? */
 };
 
+// conf_pool对应一个server监听配置
+/*
+redis_14600:
+  listen: 192.168.3.39:14600
+  hash: fnv1a_64
+  distribution: ketama
+  auto_eject_hosts: true
+  redis: true
+  redis_auth: gaia
+  server_retry_timeout: 2000
+  server_failure_limit: 1
+  servers:
+   - 192.168.3.39:7000:1
+   - 192.168.3.39:7001:1
+*/
 struct conf_pool {
     struct string      name;                  /* pool name (root node) */
     struct conf_listen listen;                /* listen: */
@@ -99,6 +114,7 @@ struct conf_pool {
     int                reuseport;             /* set SO_REUSEPORT to socket */
 };
 
+// 对应所有配置，pool数组的元素是conf_pool
 struct conf {
     const char    *fname;           /* file name (ref in argv[]) */
     FILE          *fh;              /* file handle */

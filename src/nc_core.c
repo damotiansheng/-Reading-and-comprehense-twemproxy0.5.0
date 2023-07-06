@@ -67,7 +67,8 @@ core_ctx_create(struct instance *nci)
     ctx->max_nsconn = 0;
 
     /* parse and create configuration */
-	//创建存储配置项的空间，并解析配置项，同时检查错误信息
+	// 创建存储配置项的空间，并解析配置项，同时检查错误信息
+	// 初始化配置
     ctx->cf = conf_create(nci->conf_filename);
     if (ctx->cf == NULL) {
         nc_free(ctx);
